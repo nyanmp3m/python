@@ -5,8 +5,8 @@ import requests
 from flask import Flask, jsonify, request
 
 
-def create_app(name: str, initial: list[str], peer_url: str) -> Flask:
-    app = Flask(name)
+def create_master_app(initial: list[str], replicas: list[str]) -> Flask:
+    app = Flask('master')
 
 
     products: list[str] = list(initial)
@@ -28,7 +28,7 @@ def create_app(name: str, initial: list[str], peer_url: str) -> Flask:
         name = name.strip()
 
         if name in products:
-            return jsonify(error="Такой продукт уже есть в списке"), 409
+            return jsonify(error=f"Такой продукт уже есть в списке, продукты: {products}"), 409
 
         products.append(name)
         return jsonify(product=name, products=products), 201
@@ -36,23 +36,51 @@ def create_app(name: str, initial: list[str], peer_url: str) -> Flask:
 
     @app.post("/sync")
     def sync():
-        try:
-            response = requests.get(f"{peer_url}/products", timeout=5)
-            response.raise_for_status()
-        except requests.RequestException as err:
-            return jsonify(error=f"Не удалось получить данные от второго сервера: {err}"), 502
+        return jsonify(
+            error="Я ЕСТЬ ИСТОЧНИК ПРАВДЫ!"
+        ), 405
 
-        peer_products = response.json().get("products", [])
-        if not isinstance(peer_products, list):
-            peer_products = []
+    return app
 
-        added = []
-        for item in peer_products:
-            if item not in products:
-                products.append(item)
-                added.append(item)
 
-        return jsonify(added=added, products=products)
+def create_slave_app(name: str, initial: list[str]) -> Flask:
+
+    app = Flask(name)
+
+
+    products: list[str] = list(initial)
+
+
+    @app.get("/products")
+    def get_products():
+        return jsonify(products=products)
+
+
+    @app.post("/products")
+    def add_product():
+        return jsonify(
+            error='Добавление продуктов на сервер раба запрещено'
+        ), 403
+
+
+    @app.post("/sync")
+    def sync():
+        return jsonify(
+            error='Синхронизация на сервере раба запрещена'
+        ), 403
+
+    @app.post("/replicate")
+    def replicate():
+        data = request.get_json(silent=True) or {}
+        new_products = data.get("products")
+
+        if not isinstance(new_products, list) or not all(isinstance(x, str) for x in new_products):
+            return jsonify(error='Поле "products" должно быть массивом строк'), 400
+
+        products.clear()
+        products.extend(new_products)
+        return jsonify(ok=True, products=products)
+
 
     return app
 
@@ -62,29 +90,27 @@ def run_server(app: Flask, port: int) -> None:
 
 
 if __name__ == "__main__":
-    app1 = create_app(
-        "server1",
-        initial=["Хлеб", "Молоко"],
-        peer_url="http://127.0.0.1:5002",
-    )
+    REPLICA_1 = "http://127.0.0.1:5001"
+    REPLICA_2 = "http://127.0.0.1:5002"
 
-    app2 = create_app(
-        "server2",
-        initial=["Молоко", "Сыр", "Яблоко"],
-        peer_url="http://127.0.0.1:5001",
-    )
+    master  = create_master_app(initial=["Хлеб", "Молоко"], replicas=[REPLICA_1, REPLICA_2])
+    replica1 = create_slave_app("replica1", initial=["Хлеб", "Молоко"])
+    replica2 = create_slave_app("replica2", initial=["Хлеб", "Молоко"])
 
-    t1 = threading.Thread(target=run_server, args=(app1, 5001), daemon=True)
-    t2 = threading.Thread(target=run_server, args=(app2, 5002), daemon=True)
+    threads = [
+        threading.Thread(target=run_server, args=(master,   5000), daemon=True),
+        threading.Thread(target=run_server, args=(replica1, 5001), daemon=True),
+        threading.Thread(target=run_server, args=(replica2, 5002), daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
-    t1.start()
-    t2.start()
-
-    print("Сервер 1: http://127.0.0.1:5001")
-    print("Сервер 2: http://127.0.0.1:5002")
+    print("Мастер:  http://127.0.0.1:5000")
+    print("Реплика: http://127.0.0.1:5001")
+    print("Реплика: http://127.0.0.1:5002")
 
     try:
-        t1.join()
-        t2.join()
+        for t in threads:
+            t.join()
     except KeyboardInterrupt:
         print("\nОстановка серверов")
